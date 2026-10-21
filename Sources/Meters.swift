@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 
 // Live metering. Glue streams opcode 0x68 at about 20 Hz to every connected
 // client, so this only has to listen: no registration, no subscription.
@@ -70,14 +70,41 @@ final class MeterMonitor {
         }
         connection.greet()
 
-        connection.readFrames(while: { [self] in running }) { [self] body in
+        var lastFrame = Date()
+        connection.readFrames(while: { [self] in
+            if Date().timeIntervalSince(lastFrame) > 3 { MeterMonitor.wakeMetering() }
+            return running
+        }) { [self] body in
             guard body.first == 0x68, let set = MeterMonitor.decode(body) else { return }
+            lastFrame = Date()
             let handler = onUpdate
             DispatchQueue.main.async { handler?(set) }
         }
 
         // Stream ended. If we're still wanted, reconnect.
         queue.asyncAfter(deadline: .now() + 1) { [self] in if running { loop() } }
+    }
+
+    // Glue stops metering when it restarts, and only Control 2 knows how to turn
+    // it back on. Once on, it stays on after Control 2 quits, so open it hidden
+    // for a few seconds and close it again. Leaves it alone if it's already open.
+    private static var lastWake = Date.distantPast
+    private static let controlBundleID = "com.apogeedigital.Control"
+
+    static func wakeMetering() {
+        guard Date().timeIntervalSince(lastWake) > 60 else { return }
+        lastWake = Date()
+        DispatchQueue.main.async {
+            guard NSRunningApplication.runningApplications(withBundleIdentifier: controlBundleID).isEmpty,
+                  let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: controlBundleID)
+            else { return }
+            let configuration = NSWorkspace.OpenConfiguration()
+            configuration.activates = false
+            configuration.hides = true
+            NSWorkspace.shared.openApplication(at: url, configuration: configuration) { app, _ in
+                DispatchQueue.main.asyncAfter(deadline: .now() + 5) { app?.terminate() }
+            }
+        }
     }
 
     static func decode(_ body: [UInt8]) -> MeterSet? {
